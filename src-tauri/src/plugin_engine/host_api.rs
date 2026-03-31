@@ -47,23 +47,49 @@ fn terminal_env_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
 }
 
 fn shell_from_env() -> Option<String> {
-    let shell = std::env::var("SHELL").ok()?;
-    let trimmed = shell.trim();
-    if trimmed.is_empty() {
-        return None;
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell = std::env::var("SHELL").ok()?;
+        let trimmed = shell.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let file = std::path::Path::new(trimmed).file_name()?.to_string_lossy();
+        let allowed = file == "zsh" || file == "bash" || file == "fish";
+        if allowed {
+            Some(trimmed.to_string())
+        } else {
+            None
+        }
     }
-    let file = std::path::Path::new(trimmed).file_name()?.to_string_lossy();
-    let allowed = file == "zsh" || file == "bash" || file == "fish";
-    if allowed {
-        Some(trimmed.to_string())
-    } else {
-        None
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, use cmd.exe or powershell
+        Some("cmd.exe".to_string())
     }
 }
 
 fn read_env_from_interactive_shell(program: &str, name: &str) -> Option<String> {
-    let script = format!("printenv {}", name);
-    read_env_value_via_command(program, &["-ilc", script.as_str()])
+    #[cfg(not(target_os = "windows"))]
+    {
+        let script = format!("printenv {}", name);
+        read_env_value_via_command(program, &["-ilc", script.as_str()])
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = program; // may differ from cmd.exe but we use cmd.exe for env reads
+        // On Windows, use cmd /C "echo %VAR%"
+        let script = format!("echo %{}%", name);
+        let result = read_env_value_via_command("cmd.exe", &["/C", &script])?;
+        // cmd echoes the literal "%VAR%" if the variable is not set
+        if result.starts_with('%') && result.ends_with('%') {
+            None
+        } else {
+            Some(result)
+        }
+    }
 }
 
 fn read_env_from_interactive_shells(name: &str) -> Option<String> {
@@ -73,6 +99,7 @@ fn read_env_from_interactive_shells(name: &str) -> Option<String> {
         programs.push(shell);
     }
 
+    #[cfg(not(target_os = "windows"))]
     for program in [
         "/bin/zsh",
         "/bin/bash",
@@ -82,6 +109,16 @@ fn read_env_from_interactive_shells(name: &str) -> Option<String> {
     ] {
         if !programs.iter().any(|p| p == program) {
             programs.push(program.to_string());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if !programs.iter().any(|p| p == "cmd.exe") {
+            programs.push("cmd.exe".to_string());
+        }
+        if !programs.iter().any(|p| p == "powershell.exe") {
+            programs.push("powershell.exe".to_string());
         }
     }
 
@@ -927,23 +964,13 @@ fn inject_ls<'js>(ctx: &Ctx<'js>, host: &Object<'js>, plugin_id: &str) -> rquick
                     opts.markers
                 );
 
-                let ps_output = match std::process::Command::new("/bin/ps")
-                    .args(["-ax", "-o", "pid=,command="])
-                    .output()
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        log::warn!("[plugin:{}] ps failed: {}", pid, e);
+                let ps_stdout = match get_process_list() {
+                    Some(s) => s,
+                    None => {
+                        log::warn!("[plugin:{}] process listing failed", pid);
                         return Ok("null".to_string());
                     }
                 };
-
-                if !ps_output.status.success() {
-                    log::warn!("[plugin:{}] ps returned non-zero", pid);
-                    return Ok("null".to_string());
-                }
-
-                let ps_stdout = String::from_utf8_lossy(&ps_output.stdout);
                 let process_name_lower = opts.process_name.to_lowercase();
                 let markers_lower: Vec<String> =
                     opts.markers.iter().map(|m| m.to_lowercase()).collect();
@@ -1037,40 +1064,7 @@ fn inject_ls<'js>(ctx: &Ctx<'js>, host: &Object<'js>, plugin_id: &str) -> rquick
                     }
                 }
 
-                // Find lsof binary
-                let lsof_path = ["/usr/sbin/lsof", "/usr/bin/lsof"]
-                    .iter()
-                    .find(|p| std::path::Path::new(p).exists())
-                    .copied();
-
-                let ports = if let Some(lsof) = lsof_path {
-                    match std::process::Command::new(lsof)
-                        .args([
-                            "-nP",
-                            "-iTCP",
-                            "-sTCP:LISTEN",
-                            "-a",
-                            "-p",
-                            &process_pid.to_string(),
-                        ])
-                        .output()
-                    {
-                        Ok(o) if o.status.success() => {
-                            ls_parse_listening_ports(&String::from_utf8_lossy(&o.stdout))
-                        }
-                        Ok(_) => {
-                            log::warn!("[plugin:{}] lsof returned non-zero", pid);
-                            Vec::new()
-                        }
-                        Err(e) => {
-                            log::warn!("[plugin:{}] lsof failed: {}", pid, e);
-                            Vec::new()
-                        }
-                    }
-                } else {
-                    log::warn!("[plugin:{}] lsof not found", pid);
-                    Vec::new()
-                };
+                let ports = get_listening_ports(process_pid, &pid);
 
                 if ports.is_empty() && extension_port.is_none() {
                     log::warn!(
@@ -1125,6 +1119,161 @@ pub fn patch_ls_wrapper(ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     )
 }
 
+// --- Platform-specific process listing ---
+
+/// Get a list of processes in "PID COMMAND" format, one per line.
+#[cfg(not(target_os = "windows"))]
+fn get_process_list() -> Option<String> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-ax", "-o", "pid=,command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn get_process_list() -> Option<String> {
+    // Use wmic to get PID and CommandLine in a parseable format
+    let output = std::process::Command::new("wmic")
+        .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        // Fallback to tasklist
+        let output = std::process::Command::new("tasklist")
+            .args(["/v", "/fo", "csv"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        // Convert CSV to "PID COMMAND" format
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut result = String::new();
+        for line in stdout.lines().skip(1) {
+            // CSV: "Image Name","PID","Session Name",...
+            let fields: Vec<&str> = line.split(',').collect();
+            if fields.len() >= 2 {
+                let name = fields[0].trim_matches('"');
+                let pid = fields[1].trim_matches('"');
+                result.push_str(&format!("{} {}\n", pid, name));
+            }
+        }
+        return Some(result);
+    }
+    // Parse wmic CSV output: Node,CommandLine,ProcessId
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = String::new();
+    for line in stdout.lines().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // CSV format: Node,CommandLine,ProcessId
+        // Find last comma to get PID
+        if let Some(last_comma) = trimmed.rfind(',') {
+            let pid_str = trimmed[last_comma + 1..].trim();
+            // Find first comma to skip Node
+            if let Some(first_comma) = trimmed.find(',') {
+                let command = trimmed[first_comma + 1..last_comma].trim();
+                if !pid_str.is_empty() && !command.is_empty() {
+                    result.push_str(&format!("{} {}\n", pid_str, command));
+                }
+            }
+        }
+    }
+    Some(result)
+}
+
+/// Get listening TCP ports for a given PID.
+#[cfg(not(target_os = "windows"))]
+fn get_listening_ports(process_pid: i32, plugin_id: &str) -> Vec<i32> {
+    let lsof_path = ["/usr/sbin/lsof", "/usr/bin/lsof"]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied();
+
+    if let Some(lsof) = lsof_path {
+        match std::process::Command::new(lsof)
+            .args([
+                "-nP",
+                "-iTCP",
+                "-sTCP:LISTEN",
+                "-a",
+                "-p",
+                &process_pid.to_string(),
+            ])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                ls_parse_listening_ports(&String::from_utf8_lossy(&o.stdout))
+            }
+            Ok(_) => {
+                log::warn!("[plugin:{}] lsof returned non-zero", plugin_id);
+                Vec::new()
+            }
+            Err(e) => {
+                log::warn!("[plugin:{}] lsof failed: {}", plugin_id, e);
+                Vec::new()
+            }
+        }
+    } else {
+        log::warn!("[plugin:{}] lsof not found", plugin_id);
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_listening_ports(process_pid: i32, plugin_id: &str) -> Vec<i32> {
+    // Use netstat -ano to find listening ports for a specific PID
+    let output = match std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("[plugin:{}] netstat failed: {}", plugin_id, e);
+            return Vec::new();
+        }
+    };
+
+    if !output.status.success() {
+        log::warn!("[plugin:{}] netstat returned non-zero", plugin_id);
+        return Vec::new();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid_str = process_pid.to_string();
+    let mut ports = std::collections::BTreeSet::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        // netstat output: Proto  Local Address  Foreign Address  State  PID
+        if !trimmed.contains("LISTENING") {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        // TCP    0.0.0.0:PORT    0.0.0.0:0    LISTENING    PID
+        if parts.len() >= 5 && parts[parts.len() - 1] == pid_str {
+            // Extract port from local address (e.g., "0.0.0.0:3000" or "[::]:3000")
+            if let Some(addr) = parts.get(1) {
+                if let Some(colon_pos) = addr.rfind(':') {
+                    if let Ok(port) = addr[colon_pos + 1..].parse::<i32>() {
+                        if port > 0 && port < 65536 {
+                            ports.insert(port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ports.into_iter().collect()
+}
+
 /// Extract value of a CLI flag from a command string.
 /// Handles both `--flag value` and `--flag=value` forms.
 fn ls_extract_flag(command: &str, flag: &str) -> Option<String> {
@@ -1143,6 +1292,7 @@ fn ls_extract_flag(command: &str, flag: &str) -> Option<String> {
 }
 
 /// Parse listening port numbers from `lsof -nP -iTCP -sTCP:LISTEN` output.
+#[cfg(not(target_os = "windows"))]
 fn ls_parse_listening_ports(output: &str) -> Vec<i32> {
     let mut ports = std::collections::BTreeSet::new();
     for line in output.lines() {
@@ -1757,32 +1907,9 @@ fn inject_keychain<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<
         Function::new(
             ctx.clone(),
             move |ctx_inner: Ctx<'_>, service: String| -> rquickjs::Result<String> {
-                if !cfg!(target_os = "macos") {
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        "keychain API is only supported on macOS",
-                    ));
-                }
-                let output = std::process::Command::new("security")
-                    .args(["find-generic-password", "-s", &service, "-w"])
-                    .output()
-                    .map_err(|e| {
-                        Exception::throw_message(
-                            &ctx_inner,
-                            &format!("keychain read failed: {}", e),
-                        )
-                    })?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let first_line = stderr.lines().next().unwrap_or("").trim();
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        &format!("keychain item not found: {}", first_line),
-                    ));
-                }
-
-                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                credential_read(&service).map_err(|e| {
+                    Exception::throw_message(&ctx_inner, &e)
+                })
             },
         )?,
     )?;
@@ -1792,74 +1919,211 @@ fn inject_keychain<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<
         Function::new(
             ctx.clone(),
             move |ctx_inner: Ctx<'_>, service: String, value: String| -> rquickjs::Result<()> {
-                if !cfg!(target_os = "macos") {
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        "keychain API is only supported on macOS",
-                    ));
-                }
-
-                // First, try to find existing entry and extract its account
-                let mut account_arg: Option<String> = None;
-                let find_output = std::process::Command::new("security")
-                    .args(["find-generic-password", "-s", &service])
-                    .output();
-
-                if let Ok(output) = find_output {
-                    if output.status.success() {
-                        // Parse account from output: "acct"<blob>="value"
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        for line in stdout.lines() {
-                            if let Some(start) = line.find("\"acct\"<blob>=\"") {
-                                let rest = &line[start + 14..];
-                                if let Some(end) = rest.find('"') {
-                                    account_arg = Some(rest[..end].to_string());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Build command with account if found
-                let output = if let Some(ref acct) = account_arg {
-                    std::process::Command::new("security")
-                        .args([
-                            "add-generic-password",
-                            "-s",
-                            &service,
-                            "-a",
-                            acct,
-                            "-w",
-                            &value,
-                            "-U",
-                        ])
-                        .output()
-                } else {
-                    std::process::Command::new("security")
-                        .args(["add-generic-password", "-s", &service, "-w", &value, "-U"])
-                        .output()
-                }
-                .map_err(|e| {
-                    Exception::throw_message(&ctx_inner, &format!("keychain write failed: {}", e))
-                })?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let first_line = stderr.lines().next().unwrap_or("").trim();
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        &format!("keychain write failed: {}", first_line),
-                    ));
-                }
-
-                Ok(())
+                credential_write(&service, &value).map_err(|e| {
+                    Exception::throw_message(&ctx_inner, &e)
+                })
             },
         )?,
     )?;
 
     host.set("keychain", keychain_obj)?;
     Ok(())
+}
+
+// --- Platform-specific credential storage ---
+
+#[cfg(target_os = "macos")]
+fn credential_read(service: &str) -> Result<String, String> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", service, "-w"])
+        .output()
+        .map_err(|e| format!("keychain read failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_line = stderr.lines().next().unwrap_or("").trim();
+        return Err(format!("keychain item not found: {}", first_line));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn credential_write(service: &str, value: &str) -> Result<(), String> {
+    // First, try to find existing entry and extract its account
+    let mut account_arg: Option<String> = None;
+    let find_output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", service])
+        .output();
+
+    if let Ok(output) = find_output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(start) = line.find("\"acct\"<blob>=\"") {
+                    let rest = &line[start + 14..];
+                    if let Some(end) = rest.find('"') {
+                        account_arg = Some(rest[..end].to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let output = if let Some(ref acct) = account_arg {
+        std::process::Command::new("security")
+            .args([
+                "add-generic-password", "-s", service, "-a", acct, "-w", value, "-U",
+            ])
+            .output()
+    } else {
+        std::process::Command::new("security")
+            .args(["add-generic-password", "-s", service, "-w", value, "-U"])
+            .output()
+    }
+    .map_err(|e| format!("keychain write failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_line = stderr.lines().next().unwrap_or("").trim();
+        return Err(format!("keychain write failed: {}", first_line));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn credential_read(service: &str) -> Result<String, String> {
+    // Use cmdkey to read, or PowerShell for more reliable access
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String((cmdkey /list:\"{}\" | Select-String 'Password' | ForEach-Object {{ $_.ToString().Split('=',2)[1].Trim() }})))",
+                service
+            ),
+        ])
+        .output()
+        .map_err(|e| format!("credential read failed: {}", e))?;
+
+    // Fallback: use Windows Credential Manager via PowerShell
+    if !output.status.success() {
+        let ps_output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "$cred = Get-StoredCredential -Target '{}'; if ($cred) {{ $cred.GetNetworkCredential().Password }} else {{ exit 1 }}",
+                    service
+                ),
+            ])
+            .output()
+            .map_err(|e| format!("credential read failed: {}", e))?;
+
+        if !ps_output.status.success() {
+            // Try native approach with CredRead via simple cmdkey /list parsing
+            let list_output = std::process::Command::new("cmdkey")
+                .args([&format!("/list:{}", service)])
+                .output()
+                .map_err(|e| format!("credential read failed: {}", e))?;
+
+            if !list_output.status.success() {
+                return Err(format!("credential not found for service: {}", service));
+            }
+
+            return Err(format!(
+                "credential found but password extraction not supported via cmdkey for: {}",
+                service
+            ));
+        }
+
+        return Ok(String::from_utf8_lossy(&ps_output.stdout).trim().to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn credential_write(service: &str, value: &str) -> Result<(), String> {
+    // Use cmdkey to store generic credential
+    let output = std::process::Command::new("cmdkey")
+        .args([
+            &format!("/generic:{}", service),
+            "/user:openusage",
+            &format!("/pass:{}", value),
+        ])
+        .output()
+        .map_err(|e| format!("credential write failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("credential write failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn credential_read(service: &str) -> Result<String, String> {
+    Err(format!("keychain/credential API is not supported on this platform for service: {}", service))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn credential_write(service: &str, _value: &str) -> Result<(), String> {
+    Err(format!("keychain/credential API is not supported on this platform for service: {}", service))
+}
+
+/// Find sqlite3 binary. On macOS it's pre-installed; on Windows we check PATH
+/// and a bundled location next to the executable.
+fn find_sqlite3() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        // Check if sqlite3.exe is in PATH
+        if let Ok(output) = std::process::Command::new("where").arg("sqlite3.exe").output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout);
+                if let Some(first) = path.lines().next() {
+                    let trimmed = first.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
+            }
+        }
+        // Check bundled location next to the executable
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let bundled = dir.join("sqlite3.exe");
+                if bundled.exists() {
+                    return bundled.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+    "sqlite3".to_string()
+}
+
+/// Build a file URI for sqlite3 immutable mode, handling Windows drive letters.
+fn sqlite3_file_uri(expanded: &str) -> String {
+    let encoded = expanded
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('#', "%23")
+        .replace('?', "%3F");
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows paths like C:\foo need file:///C:/foo format
+        let forward = encoded.replace('\\', "/");
+        format!("file:///{}?immutable=1", forward)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!("file:{}?immutable=1", encoded)
+    }
 }
 
 fn inject_sqlite<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<()> {
@@ -1877,10 +2141,11 @@ fn inject_sqlite<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<()
                     ));
                 }
                 let expanded = expand_path(&db_path);
+                let sqlite3 = find_sqlite3();
 
-                // Prefer a normal read-only open so WAL contents are visible (common for app state DBs).
-                // Fall back to immutable=1 to bypass WAL/SHM lock issues after macOS sleep.
-                let primary = std::process::Command::new("sqlite3")
+                // Prefer a normal read-only open so WAL contents are visible.
+                // Fall back to immutable=1 to bypass WAL/SHM lock issues.
+                let primary = std::process::Command::new(&sqlite3)
                     .args(["-readonly", "-json", &expanded, &sql])
                     .output()
                     .map_err(|e| {
@@ -1891,14 +2156,8 @@ fn inject_sqlite<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<()
                     return Ok(String::from_utf8_lossy(&primary.stdout).to_string());
                 }
 
-                // Percent-encode special chars for valid URI (% must be first!)
-                let encoded = expanded
-                    .replace('%', "%25")
-                    .replace(' ', "%20")
-                    .replace('#', "%23")
-                    .replace('?', "%3F");
-                let uri_path = format!("file:{}?immutable=1", encoded);
-                let fallback = std::process::Command::new("sqlite3")
+                let uri_path = sqlite3_file_uri(&expanded);
+                let fallback = std::process::Command::new(&sqlite3)
                     .args(["-readonly", "-json", &uri_path, &sql])
                     .output()
                     .map_err(|e| {
@@ -1935,7 +2194,8 @@ fn inject_sqlite<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<()
                     ));
                 }
                 let expanded = expand_path(&db_path);
-                let output = std::process::Command::new("sqlite3")
+                let sqlite3 = find_sqlite3();
+                let output = std::process::Command::new(&sqlite3)
                     .args([&expanded, &sql])
                     .output()
                     .map_err(|e| {

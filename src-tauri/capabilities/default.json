@@ -18,6 +18,14 @@
     "process:allow-restart",
     "global-shortcut:default",
     "autostart:default",
-    "core:menu:default"
+    "core:menu:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-position",
+    "core:window:allow-is-visible",
+    "core:window:allow-is-focused"
   ]
 }

@@ -9,6 +9,8 @@ import { usePanel } from "@/hooks/app/use-panel"
 import { useAppUpdate } from "@/hooks/use-app-update"
 import { useAppUiStore } from "@/stores/app-ui-store"
 
+const IS_MACOS = navigator.userAgent.includes("Macintosh")
+
 const ARROW_OVERHEAD_PX = 37
 
 type AppShellProps = {
@@ -67,12 +69,22 @@ export function AppShell({
   const { updateStatus, triggerInstall, checkForUpdates } = useAppUpdate()
 
   return (
-    <div ref={containerRef} className="flex flex-col items-center p-6 pt-1.5 bg-transparent">
-      <div className="tray-arrow" />
+    <div ref={containerRef} className={IS_MACOS ? "flex flex-col items-center p-6 pt-1.5 bg-transparent" : "flex flex-col items-center bg-card"}>
+      {IS_MACOS && <div className="tray-arrow" />}
       <div
         className="relative bg-card rounded-xl overflow-hidden select-none w-full border shadow-lg flex flex-col"
         style={maxPanelHeightPx ? { maxHeight: `${maxPanelHeightPx - ARROW_OVERHEAD_PX}px` } : undefined}
       >
+        {/* Drag region for Windows (no NSPanel) */}
+        {!IS_MACOS && <div
+          className="h-3 w-full cursor-move shrink-0"
+          onMouseDown={async (e) => {
+            if (e.button === 0) {
+              const { getCurrentWindow } = await import("@tauri-apps/api/window")
+              getCurrentWindow().startDragging()
+            }
+          }}
+        />}
         <div className="flex flex-1 min-h-0 flex-row">
           <SideNav
             activeView={activeView}

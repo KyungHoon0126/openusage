@@ -1,6 +1,10 @@
 (function () {
-  const STATE_DB =
-    "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+  var STATE_DB = (function () {
+    if (typeof __openusage_ctx !== "undefined" && __openusage_ctx.app && __openusage_ctx.app.platform === "windows") {
+      return "~/AppData/Roaming/Cursor/User/globalStorage/state.vscdb"
+    }
+    return "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+  })()
   const KEYCHAIN_ACCESS_TOKEN_SERVICE = "cursor-access-token"
   const KEYCHAIN_REFRESH_TOKEN_SERVICE = "cursor-refresh-token"
   const BASE_URL = "https://api2.cursor.sh"

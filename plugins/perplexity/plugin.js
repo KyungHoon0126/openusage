@@ -4,10 +4,18 @@
   const REST_GROUPS_ENDPOINT = REST_API_BASE + "/groups"
   const RATE_LIMIT_ENDPOINT = "https://www.perplexity.ai/rest/rate-limit/all"
 
-  const LOCAL_CACHE_DB_PATHS = [
-    "~/Library/Containers/ai.perplexity.mac/Data/Library/Caches/ai.perplexity.mac/Cache.db",
-    "~/Library/Caches/ai.perplexity.mac/Cache.db",
-  ]
+  var LOCAL_CACHE_DB_PATHS = (function () {
+    if (typeof __openusage_ctx !== "undefined" && __openusage_ctx.app && __openusage_ctx.app.platform === "windows") {
+      return [
+        "~/AppData/Local/ai.perplexity/Cache/Cache.db",
+        "~/AppData/Roaming/ai.perplexity/Cache/Cache.db",
+      ]
+    }
+    return [
+      "~/Library/Containers/ai.perplexity.mac/Data/Library/Caches/ai.perplexity.mac/Cache.db",
+      "~/Library/Caches/ai.perplexity.mac/Cache.db",
+    ]
+  })()
 
   // Only need request_object; receiver body is optional and can be malformed.
   const LOCAL_SESSION_SQL =

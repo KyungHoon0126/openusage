@@ -7,16 +7,19 @@
   var DAY_MS = 24 * 60 * 60 * 1000
   var WEEK_MS = 7 * DAY_MS
 
+  var IS_WINDOWS = (typeof __openusage_ctx !== "undefined" && __openusage_ctx.app && __openusage_ctx.app.platform === "windows")
+  var APP_SUPPORT = IS_WINDOWS ? "~/AppData/Roaming" : "~/Library/Application Support"
+
   var VARIANTS = [
     {
       marker: "windsurf",
       ideName: "windsurf",
-      stateDb: "~/Library/Application Support/Windsurf/User/globalStorage/state.vscdb",
+      stateDb: APP_SUPPORT + "/Windsurf/User/globalStorage/state.vscdb",
     },
     {
       marker: "windsurf-next",
       ideName: "windsurf-next",
-      stateDb: "~/Library/Application Support/Windsurf - Next/User/globalStorage/state.vscdb",
+      stateDb: APP_SUPPORT + "/Windsurf - Next/User/globalStorage/state.vscdb",
     },
   ]
 

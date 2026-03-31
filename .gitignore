@@ -28,6 +28,15 @@ tmpcov-gem
 .env*
 !.env.example
 
+# OMC / Claude working files
+.omc/
+.claude/
+
+# Windows build helper scripts
+build-check.bat
+build-release.bat
+dev.bat
+
 # Agent working files
 docs/choices.md
 docs/breadcrumbs.md

@@ -1,6 +1,11 @@
 (function () {
   var LS_SERVICE = "exa.language_server_pb.LanguageServerService"
-  var STATE_DB = "~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb"
+  var STATE_DB = (function () {
+    if (typeof __openusage_ctx !== "undefined" && __openusage_ctx.app && __openusage_ctx.app.platform === "windows") {
+      return "~/AppData/Roaming/Antigravity/User/globalStorage/state.vscdb"
+    }
+    return "~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb"
+  })()
   var CLOUD_CODE_URLS = [
     "https://daily-cloudcode-pa.googleapis.com",
     "https://cloudcode-pa.googleapis.com",
