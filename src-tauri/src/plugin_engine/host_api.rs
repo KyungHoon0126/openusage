@@ -1136,53 +1136,24 @@ fn get_process_list() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn get_process_list() -> Option<String> {
-    // Use wmic to get PID and CommandLine in a parseable format
-    let output = std::process::Command::new("wmic")
-        .args(["process", "get", "ProcessId,CommandLine", "/format:csv"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        // Fallback to tasklist
-        let output = std::process::Command::new("tasklist")
-            .args(["/v", "/fo", "csv"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        // Convert CSV to "PID COMMAND" format
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut result = String::new();
-        for line in stdout.lines().skip(1) {
-            // CSV: "Image Name","PID","Session Name",...
-            let fields: Vec<&str> = line.split(',').collect();
-            if fields.len() >= 2 {
-                let name = fields[0].trim_matches('"');
-                let pid = fields[1].trim_matches('"');
-                result.push_str(&format!("{} {}\n", pid, name));
-            }
-        }
-        return Some(result);
-    }
-    // Parse wmic CSV output: Node,CommandLine,ProcessId
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    use sysinfo::System;
+
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
     let mut result = String::new();
-    for line in stdout.lines().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // CSV format: Node,CommandLine,ProcessId
-        // Find last comma to get PID
-        if let Some(last_comma) = trimmed.rfind(',') {
-            let pid_str = trimmed[last_comma + 1..].trim();
-            // Find first comma to skip Node
-            if let Some(first_comma) = trimmed.find(',') {
-                let command = trimmed[first_comma + 1..last_comma].trim();
-                if !pid_str.is_empty() && !command.is_empty() {
-                    result.push_str(&format!("{} {}\n", pid_str, command));
-                }
-            }
+    for (pid, process) in sys.processes() {
+        let cmd = process.cmd();
+        let cmd_str = if cmd.is_empty() {
+            process.name().to_string_lossy().to_string()
+        } else {
+            cmd.iter()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if !cmd_str.is_empty() {
+            result.push_str(&format!("{} {}\n", pid.as_u32(), cmd_str));
         }
     }
     Some(result)
@@ -1995,71 +1966,63 @@ fn credential_write(service: &str, value: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn credential_read(service: &str) -> Result<String, String> {
-    // Use cmdkey to read, or PowerShell for more reliable access
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String((cmdkey /list:\"{}\" | Select-String 'Password' | ForEach-Object {{ $_.ToString().Split('=',2)[1].Trim() }})))",
-                service
-            ),
-        ])
-        .output()
-        .map_err(|e| format!("credential read failed: {}", e))?;
+    use windows::core::PCWSTR;
+    use windows::Win32::Security::Credentials::{CredReadW, CredFree, CRED_TYPE_GENERIC};
 
-    // Fallback: use Windows Credential Manager via PowerShell
-    if !output.status.success() {
-        let ps_output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "$cred = Get-StoredCredential -Target '{}'; if ($cred) {{ $cred.GetNetworkCredential().Password }} else {{ exit 1 }}",
-                    service
-                ),
-            ])
-            .output()
-            .map_err(|e| format!("credential read failed: {}", e))?;
+    let target: Vec<u16> = service.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut cred_ptr = std::ptr::null_mut();
 
-        if !ps_output.status.success() {
-            // Try native approach with CredRead via simple cmdkey /list parsing
-            let list_output = std::process::Command::new("cmdkey")
-                .args([&format!("/list:{}", service)])
-                .output()
-                .map_err(|e| format!("credential read failed: {}", e))?;
+    unsafe {
+        let success = CredReadW(
+            PCWSTR(target.as_ptr()),
+            CRED_TYPE_GENERIC,
+            0,
+            &mut cred_ptr,
+        );
 
-            if !list_output.status.success() {
-                return Err(format!("credential not found for service: {}", service));
-            }
-
-            return Err(format!(
-                "credential found but password extraction not supported via cmdkey for: {}",
-                service
-            ));
+        if success.is_err() || cred_ptr.is_null() {
+            return Err(format!("credential not found for service: {}", service));
         }
 
-        return Ok(String::from_utf8_lossy(&ps_output.stdout).trim().to_string());
-    }
+        let cred = &*cred_ptr;
+        let result = if cred.CredentialBlobSize > 0 && !cred.CredentialBlob.is_null() {
+            let bytes = std::slice::from_raw_parts(
+                cred.CredentialBlob,
+                cred.CredentialBlobSize as usize,
+            );
+            String::from_utf8_lossy(bytes).to_string()
+        } else {
+            CredFree(cred_ptr as *mut _);
+            return Err(format!("credential is empty for service: {}", service));
+        };
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        CredFree(cred_ptr as *mut _);
+        Ok(result)
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn credential_write(service: &str, value: &str) -> Result<(), String> {
-    // Use cmdkey to store generic credential
-    let output = std::process::Command::new("cmdkey")
-        .args([
-            &format!("/generic:{}", service),
-            "/user:openusage",
-            &format!("/pass:{}", value),
-        ])
-        .output()
-        .map_err(|e| format!("credential write failed: {}", e))?;
+    use windows::core::PWSTR;
+    use windows::Win32::Security::Credentials::{CredWriteW, CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE};
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("credential write failed: {}", stderr.trim()));
+    let mut target: Vec<u16> = service.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut user: Vec<u16> = "openusage".encode_utf16().chain(std::iter::once(0)).collect();
+    let blob = value.as_bytes();
+
+    let mut cred = CREDENTIALW {
+        Type: CRED_TYPE_GENERIC,
+        TargetName: PWSTR(target.as_mut_ptr()),
+        UserName: PWSTR(user.as_mut_ptr()),
+        CredentialBlobSize: blob.len() as u32,
+        CredentialBlob: blob.as_ptr() as *mut u8,
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        ..Default::default()
+    };
+
+    unsafe {
+        CredWriteW(&mut cred, 0)
+            .map_err(|e| format!("credential write failed: {}", e))?;
     }
 
     Ok(())

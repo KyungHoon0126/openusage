@@ -182,7 +182,7 @@
 
   function discoverLs(ctx) {
     return ctx.host.ls.discover({
-      processName: "language_server_macos",
+      processName: (typeof __openusage_ctx !== "undefined" && __openusage_ctx.app && __openusage_ctx.app.platform === "windows") ? "language_server" : "language_server_macos",
       markers: ["antigravity"],
       csrfFlag: "--csrf_token",
       portFlag: "--extension_server_port",
