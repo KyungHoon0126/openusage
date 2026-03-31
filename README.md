@@ -1,18 +1,21 @@
 # Track all your AI coding subscriptions in one place
 
-See your usage at a glance from your menu bar. No digging through dashboards.
+See your usage at a glance from your system tray. No digging through dashboards.
 
 ![OpenUsage Screenshot](screenshot.png)
 
 ## Download
 
-[**Download the latest release**](https://github.com/robinebers/openusage/releases/latest) (macOS, Apple Silicon & Intel)
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon & Intel) | [**Latest Release**](https://github.com/robinebers/openusage/releases/latest) |
+| Windows (x64) | [**Latest Release**](https://github.com/KyungHoon0126/openusage/releases/latest) |
 
-The app auto-updates. Install once and you're set.
+The macOS version auto-updates. Install once and you're set.
 
 ## What It Does
 
-OpenUsage lives in your menu bar and shows you how much of your AI coding subscriptions you've used. Progress bars, badges, and clear labels. No mental math required.
+OpenUsage lives in your system tray (menu bar on macOS) and shows you how much of your AI coding subscriptions you've used. Progress bars, badges, and clear labels. No mental math required.
 
 - **One glance.** All your AI tools, one panel.
 - **Always up-to-date.** Refreshes automatically on a schedule you pick.
@@ -89,6 +92,38 @@ Inspired by [CodexBar](https://github.com/steipete/CodexBar) by [@steipete](http
 <summary><strong>Build from source</strong></summary>
 
 > **Warning**: The `main` branch may not be stable. It is merged directly without staging, so users are advised to use tagged versions for stable builds. Tagged versions are fully tested while `main` may contain unreleased features.
+
+### Prerequisites
+
+**macOS:**
+- Rust (via rustup)
+- Bun (or Node.js + npm)
+- Xcode Command Line Tools
+
+**Windows:**
+- Rust (via rustup, MSVC target)
+- Visual Studio Build Tools with C++ workload (cl.exe, link.exe)
+- Windows SDK (kernel32.lib)
+- LLVM (libclang.dll for bindgen)
+- Node.js + npm
+
+### Build
+
+```bash
+# Install dependencies
+npm install  # or: bun install
+
+# Bundle plugins
+node copy-bundled.cjs  # or: bun run bundle:plugins
+
+# Development mode
+npx tauri dev
+
+# Release build (produces installer)
+npx tauri build
+```
+
+**Windows note:** If `link.exe` is not found, ensure MSVC tools are in PATH or run from a Visual Studio Developer Command Prompt.
 
 ### Stack
 
