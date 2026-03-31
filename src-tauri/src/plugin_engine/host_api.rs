@@ -79,16 +79,16 @@ fn read_env_from_interactive_shell(program: &str, name: &str) -> Option<String> 
 
     #[cfg(target_os = "windows")]
     {
-        let _ = program; // may differ from cmd.exe but we use cmd.exe for env reads
-        // On Windows, use cmd /C "echo %VAR%"
-        let script = format!("echo %{}%", name);
-        let result = read_env_value_via_command("cmd.exe", &["/C", &script])?;
-        // cmd echoes the literal "%VAR%" if the variable is not set
-        if result.starts_with('%') && result.ends_with('%') {
-            None
-        } else {
-            Some(result)
+        let _ = program;
+        // Validate name contains only safe characters to prevent injection
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
         }
+        // Read env var directly without shelling out
+        std::env::var(name).ok().and_then(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
     }
 }
 
