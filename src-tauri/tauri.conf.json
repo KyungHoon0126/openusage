@@ -4,9 +4,9 @@
   "version": "0.6.11",
   "identifier": "com.sunstory.openusage",
   "build": {
-    "beforeDevCommand": "node copy-bundled.cjs && npx vite",
+    "beforeDevCommand": "npm run bundle:plugins && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node copy-bundled.cjs && npm run build",
+    "beforeBuildCommand": "npm run bundle:plugins && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -67,7 +67,7 @@
       "resources/bundled_plugins/**/*",
       "icons/tray-icon.png"
     ],
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
